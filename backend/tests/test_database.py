@@ -13,11 +13,11 @@ def migration_dir():
 
 def test_migration_creates_v1_and_seven_tables(tmp_path):
     con = open_connection(tmp_path / "test.db")
-    assert migrate(con, migration_dir()) == 2
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert migrate(con, migration_dir()) == 3
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 3
     tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"machine_profile", "models", "conversations", "messages", "jobs", "job_events", "settings", "services", "behaviors"} <= tables
-    assert migrate(con, migration_dir()) == 2
+    assert migrate(con, migration_dir()) == 3
 
 
 def test_foreign_keys_and_checks(tmp_path):

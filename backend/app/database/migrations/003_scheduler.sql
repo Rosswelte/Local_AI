@@ -1,0 +1,7 @@
+ALTER TABLE jobs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2;
+ALTER TABLE jobs ADD COLUMN timeout_s INTEGER;
+ALTER TABLE jobs ADD COLUMN next_run_at TEXT;
+ALTER TABLE jobs ADD COLUMN retryable INTEGER NOT NULL DEFAULT 1 CHECK (retryable IN (0, 1));
+
+CREATE INDEX IF NOT EXISTS idx_jobs_retry ON jobs(state, next_run_at, priority DESC, id);

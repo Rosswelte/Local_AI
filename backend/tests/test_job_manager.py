@@ -6,6 +6,7 @@ import pytest
 from app.database.database import Database
 from app.orchestrator.jobs import JobManager
 from app.orchestrator.resource_manager import ResourceManager
+from app.orchestrator.scheduler import JobPolicy, Scheduler
 from app.providers.fake import FakeProvider
 
 
@@ -63,5 +64,44 @@ async def test_running_job_cancellation_preserves_partial_text(tmp_path):
     message = await db.read(lambda con: dict(con.execute("SELECT content, status FROM messages WHERE id=2").fetchone()))
     assert message["status"] == "cancelled"
     assert message["content"]
+    await manager.stop()
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_is_retried_with_backoff(tmp_path):
+    db = Database(tmp_path / "orchestrator.db")
+    await db.start(MIGRATIONS)
+    job_id = await seed_job(db)
+    provider = FakeProvider(text="réussi", failures=1, memory={"ram_mb": 10, "vram_mb": 0})
+    scheduler = Scheduler()
+    scheduler.retry_delay = lambda attempt: 0.01
+    manager = JobManager(db, {"fake": provider}, ResourceManager({"ram_mb": 100, "vram_mb": 0}), scheduler)
+    await manager.start()
+    await manager.enqueue()
+    assert await wait_for_state(db, job_id, {"completed"}) == "completed"
+    assert provider.run_attempts == 2
+    job = await db.read(lambda con: dict(con.execute("SELECT attempt, state FROM jobs WHERE id=?", (job_id,)).fetchone()))
+    assert job == {"attempt": 2, "state": "completed"}
+    await manager.stop()
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_job_timeout_is_terminal_when_retries_are_disabled(tmp_path):
+    class TightScheduler(Scheduler):
+        def policy(self, job):
+            return JobPolicy(timeout_s=0.01, max_retries=0)
+
+    db = Database(tmp_path / "orchestrator.db")
+    await db.start(MIGRATIONS)
+    job_id = await seed_job(db)
+    provider = FakeProvider(text="trop lent", delay=0.1, memory={"ram_mb": 10, "vram_mb": 0})
+    manager = JobManager(db, {"fake": provider}, ResourceManager({"ram_mb": 100, "vram_mb": 0}), TightScheduler())
+    await manager.start()
+    await manager.enqueue()
+    assert await wait_for_state(db, job_id, {"failed"}) == "failed"
+    error = await db.read(lambda con: dict(con.execute("SELECT error_code FROM jobs WHERE id=?", (job_id,)).fetchone()))
+    assert error["error_code"] == "provider_timeout"
     await manager.stop()
     await db.close()

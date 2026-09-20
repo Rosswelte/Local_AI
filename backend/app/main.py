@@ -17,6 +17,7 @@ from app.database.database import Database
 from app.hardware.detector import detect_profile
 from app.orchestrator.jobs import JobManager, restart_jobs
 from app.orchestrator.resource_manager import ResourceManager
+from app.orchestrator.scheduler import Scheduler
 from app.providers.ollama import OllamaProvider
 from app.providers.manager import ProviderManager
 from app.services.catalog import load_catalog, upsert_catalog
@@ -58,7 +59,10 @@ async def lifespan(app: FastAPI):
         await resources.sync_loaded("ollama", await ollama.loaded_models())
     except Exception:
         logging.info("Unable to synchronize loaded Ollama models during startup", exc_info=True)
-    app.state.jobs = JobManager(db, app.state.providers, resources)
+    allow_parallel = configured["allow_parallel"]["value"]
+    worker_count = 2 if allow_parallel is True else 1
+    app.state.scheduler = Scheduler(worker_count)
+    app.state.jobs = JobManager(db, app.state.providers, resources, app.state.scheduler)
     await app.state.jobs.start()
     app.state.ready = True
     try:

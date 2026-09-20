@@ -5,11 +5,13 @@ from .base import AIProvider, ProviderEvent
 
 
 class FakeProvider(AIProvider):
-    def __init__(self, text: str = "Réponse simulée.", delay: float = 0.001, memory: dict[str, int] | None = None, fail: bool = False):
+    def __init__(self, text: str = "Réponse simulée.", delay: float = 0.001, memory: dict[str, int] | None = None, fail: bool = False, failures: int = 0):
         self.text = text
         self.delay = delay
         self.memory = memory or {"ram_mb": 100, "vram_mb": 0}
         self.fail = fail
+        self.failures = failures
+        self.run_attempts = 0
         self.cancelled: set[int] = set()
         self.loaded_calls: list[tuple[str, bool]] = []
         self.unloaded_calls: list[str] = []
@@ -25,7 +27,9 @@ class FakeProvider(AIProvider):
 
     async def run(self, model: dict[str, Any], messages: list[dict[str, str]], options: dict[str, Any] | None = None) -> AsyncIterator[ProviderEvent]:
         job_id = int((options or {}).get("job_id", 0))
-        if self.fail:
+        self.run_attempts += 1
+        if self.fail or self.failures:
+            self.failures = max(0, self.failures - 1)
             raise RuntimeError("fake provider failure")
         for index, token in enumerate(self.text.split(" "), 1):
             await asyncio.sleep(self.delay)

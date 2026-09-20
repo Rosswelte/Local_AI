@@ -6,6 +6,7 @@ from typing import Any
 from app.errors import AppError
 from app.orchestrator.events import EventHub
 from app.orchestrator.resource_manager import ResourceManager
+from app.orchestrator.scheduler import Scheduler
 from app.providers.base import AIProvider
 
 
@@ -19,10 +20,10 @@ def create_job(con, *, kind="text", provider="ollama", model_id=None, message_id
 
 
 def take_next_job(con):
-    row = con.execute("SELECT * FROM jobs WHERE state = 'queued' ORDER BY priority DESC, created_at ASC, id ASC LIMIT 1").fetchone()
+    row = con.execute("SELECT * FROM jobs WHERE state = 'queued' AND (next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP) ORDER BY priority DESC, created_at ASC, id ASC LIMIT 1").fetchone()
     if not row:
         return None
-    con.execute("UPDATE jobs SET state='running', started_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+    con.execute("UPDATE jobs SET state='running', attempt=attempt + 1, started_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
     return _row(con.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
 
 
@@ -34,24 +35,26 @@ def restart_jobs(con):
 
 
 class JobManager:
-    def __init__(self, db, providers: dict[str, AIProvider], resource_manager: ResourceManager):
+    def __init__(self, db, providers: dict[str, AIProvider], resource_manager: ResourceManager, scheduler: Scheduler | None = None):
         self.db = db
         self.providers = providers
         self.resources = resource_manager
+        self.scheduler = scheduler or Scheduler()
         self.events = EventHub()
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
-        self._task: asyncio.Task | None = None
+        self._tasks: list[asyncio.Task] = []
         self._event_ids: dict[int, int] = {}
 
-    async def start(self) -> None:
-        self._task = asyncio.create_task(self._worker(), name="job-worker")
+    async def start(self, worker_count: int | None = None) -> None:
+        count = worker_count or self.scheduler.worker_count
+        self._tasks = [asyncio.create_task(self._worker(index), name=f"job-worker-{index}") for index in range(count)]
 
     async def stop(self) -> None:
         self._stop.set()
         self._wake.set()
-        if self._task:
-            await self._task
+        if self._tasks:
+            await asyncio.gather(*self._tasks)
 
     async def enqueue(self) -> None:
         self._wake.set()
@@ -78,7 +81,7 @@ class JobManager:
             await self.providers[result[1]].cancel(job_id)
         self._wake.set()
 
-    async def _worker(self) -> None:
+    async def _worker(self, worker_id: int) -> None:
         while not self._stop.is_set():
             job = await self.db.write(take_next_job)
             if not job:
@@ -88,19 +91,35 @@ class JobManager:
                 except asyncio.TimeoutError:
                     pass
                 continue
+            terminal = True
             try:
-                await self._run_job(job)
+                policy = self.scheduler.policy(job)
+                await asyncio.wait_for(self._run_job(job), timeout=policy.timeout_s)
+            except asyncio.TimeoutError:
+                terminal = not await self._handle_failure(job, AppError("provider_timeout", "Le provider n'a pas répondu dans le délai", 504))
             except Exception as exc:
-                if getattr(exc, "code", None) == "cancelled":
-                    await self.db.write(lambda con: con.execute("UPDATE jobs SET state='cancelled', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],)))
-                    await self._set_message(job, job.get("_partial_text", ""), "cancelled")
-                    await self._emit(job["id"], "cancelled", {})
-                else:
-                    await self.db.write(lambda con: con.execute("UPDATE jobs SET state='failed', error_code=?, error_message=?, finished_at=CURRENT_TIMESTAMP WHERE id=?", (getattr(exc, "code", "provider_error"), str(exc), job["id"])))
-                    await self._set_message(job, job.get("_partial_text", ""), "error")
-                    await self._emit(job["id"], "error", {"message": str(exc)})
+                terminal = not await self._handle_failure(job, exc)
             finally:
-                await self.events.finish(job["id"])
+                if terminal:
+                    await self.events.finish(job["id"])
+
+    async def _handle_failure(self, job: dict[str, Any], exc: Exception) -> bool:
+        code = getattr(exc, "code", "provider_error")
+        policy = self.scheduler.policy(job)
+        if self.scheduler.can_retry(code, bool(job.get("retryable", 1))) and int(job.get("attempt", 1)) <= policy.max_retries:
+            delay = self.scheduler.retry_delay(int(job.get("attempt", 1)))
+            await self.db.write(lambda con, retry_code, retry_message, retry_delay: con.execute("UPDATE jobs SET state='queued', error_code=?, error_message=?, next_run_at=datetime('now', ?), finished_at=NULL WHERE id=?", (retry_code, retry_message, f"+{retry_delay} seconds", job["id"])), code, str(exc), delay)
+            await self._emit(job["id"], "warning", {"code": "retry_scheduled", "attempt": job.get("attempt", 1), "delay_s": delay})
+            return True
+        if code == "cancelled":
+            await self.db.write(lambda con: con.execute("UPDATE jobs SET state='cancelled', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],)))
+            await self._set_message(job, job.get("_partial_text", ""), "cancelled")
+            await self._emit(job["id"], "cancelled", {})
+        else:
+            await self.db.write(lambda con: con.execute("UPDATE jobs SET state='failed', error_code=?, error_message=?, finished_at=CURRENT_TIMESTAMP WHERE id=?", (code, str(exc), job["id"])))
+            await self._set_message(job, job.get("_partial_text", ""), "error")
+            await self._emit(job["id"], "error", {"code": code, "message": str(exc)})
+        return False
 
     async def _run_job(self, job: dict[str, Any]) -> None:
         provider = self.providers[job["provider"]]
