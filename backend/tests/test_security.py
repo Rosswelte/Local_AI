@@ -11,3 +11,6 @@ def test_external_api_requires_admin_password(monkeypatch, tmp_path):
         assert client.get("/api/v1/health").status_code == 200
         assert client.get("/api/v1/models").status_code == 401
         assert client.get("/api/v1/models", headers={"X-Admin-Password": "secret"}).status_code == 200
+        response = client.put("/api/v1/settings", headers={"X-Admin-Password": "secret"}, json={"values": {"allow_parallel": True}})
+        assert response.status_code == 200
+        assert response.json()["allow_parallel"]["value"] is True

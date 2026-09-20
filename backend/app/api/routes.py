@@ -23,6 +23,19 @@ class MessageIn(BaseModel):
     force: bool = False
 
 
+class BehaviorIn(BaseModel):
+    name: str = Field(min_length=1)
+    description: str | None = None
+    system_prompt: str = "Tu es un assistant utile."
+    default_model_id: int | None = None
+    allowed_tools: list[str] = []
+    params: dict[str, Any] = {}
+
+
+class SettingsIn(BaseModel):
+    values: dict[str, Any]
+
+
 def state(request: Request):
     return request.app.state
 
@@ -71,8 +84,56 @@ async def models(request: Request):
         row["fit"] = evaluate(row, request.app.state.profile)
         row["perf"] = json.loads(row["perf"] or "{}")
         row["config"] = json.loads(row["config"] or "{}")
+        row["capabilities"] = json.loads(row.get("capabilities") or "[]")
+        row["spec"] = json.loads(row.get("spec") or "{}")
         result.append(row)
     return result
+
+
+@router.get("/services")
+async def services(request: Request):
+    return await request.app.state.db.read(lambda con: [
+        {key: value for key, value in dict(row).items() if key not in {"api_key_enc", "extra_headers_enc"}}
+        for row in con.execute("SELECT * FROM services ORDER BY id")
+    ])
+
+
+@router.get("/services/status")
+async def service_status(request: Request):
+    return await request.app.state.service_manager.check()
+
+
+@router.get("/settings")
+async def settings(request: Request):
+    from app.services.settings import read_settings
+    return await request.app.state.db.read(read_settings)
+
+
+@router.put("/settings")
+async def update_settings(payload: SettingsIn, request: Request):
+    from app.services.settings import read_settings, write_settings
+    await request.app.state.db.write(write_settings, payload.values)
+    configured = await request.app.state.db.read(read_settings)
+    profile = request.app.state.profile
+    await request.app.state.resources.update_budgets({
+        "ram_mb": int(configured["ram_budget_mb"]["value"] or profile.ram_budget_mb),
+        "vram_mb": int(configured["vram_budget_mb"]["value"] or profile.vram_budget_mb),
+    })
+    return configured
+
+
+@router.get("/behaviors")
+async def behaviors(request: Request):
+    return await request.app.state.db.read(lambda con: [_behavior(row) for row in con.execute("SELECT * FROM behaviors ORDER BY id")])
+
+
+@router.post("/behaviors")
+async def create_behavior(payload: BehaviorIn, request: Request):
+    def insert(con):
+        cursor = con.execute("INSERT INTO behaviors(name, description, system_prompt, default_model_id, allowed_tools, params) VALUES (?, ?, ?, ?, ?, ?)", (payload.name, payload.description, payload.system_prompt, payload.default_model_id, json.dumps(payload.allowed_tools), json.dumps(payload.params)))
+        return cursor.lastrowid
+    behavior_id = await request.app.state.db.write(insert)
+    return {"id": behavior_id, "name": payload.name, "description": payload.description, "system_prompt": payload.system_prompt, "default_model_id": payload.default_model_id, "allowed_tools": payload.allowed_tools, "params": payload.params}
 
 
 @router.post("/models/sync")
@@ -251,3 +312,11 @@ def _sync_installed(con, names):
     con.execute("UPDATE models SET installed=0")
     for name in names:
         con.execute("UPDATE models SET installed=1 WHERE name=?", (name,))
+
+
+def _behavior(row):
+    item = dict(row)
+    item["allowed_tools"] = json.loads(item["allowed_tools"] or "[]")
+    item["params"] = json.loads(item["params"] or "{}")
+    item["active"] = bool(item["active"])
+    return item

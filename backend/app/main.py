@@ -18,7 +18,10 @@ from app.hardware.detector import detect_profile
 from app.orchestrator.jobs import JobManager, restart_jobs
 from app.orchestrator.resource_manager import ResourceManager
 from app.providers.ollama import OllamaProvider
+from app.providers.manager import ProviderManager
 from app.services.catalog import load_catalog, upsert_catalog
+from app.services.manager import ServiceManager
+from app.services.settings import read_settings
 from app.errors import AppError
 
 
@@ -38,12 +41,18 @@ async def lifespan(app: FastAPI):
     ollama = OllamaProvider(settings.ollama_url)
     app.state.ollama = ollama
     app.state.providers = {"ollama": ollama}
+    app.state.provider_manager = ProviderManager(app.state.providers)
+    app.state.service_manager = ServiceManager(db, app.state.providers)
+    await app.state.service_manager.ensure_local_services(settings.ollama_url)
     try:
         installed = await ollama.installed_models()
         await db.write(_sync_installed_names, {item.get("name") for item in installed})
     except Exception:
         logging.info("Ollama is offline during startup", exc_info=True)
-    resources = ResourceManager({"ram_mb": profile.ram_budget_mb, "vram_mb": profile.vram_budget_mb}, app.state.providers)
+    configured = await db.read(read_settings)
+    ram_budget = configured["ram_budget_mb"]["value"] or profile.ram_budget_mb
+    vram_budget = configured["vram_budget_mb"]["value"] or profile.vram_budget_mb
+    resources = ResourceManager({"ram_mb": int(ram_budget), "vram_mb": int(vram_budget)}, app.state.providers)
     app.state.resources = resources
     app.state.jobs = JobManager(db, app.state.providers, resources)
     await app.state.jobs.start()
