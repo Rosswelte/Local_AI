@@ -50,10 +50,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.info("Ollama is offline during startup", exc_info=True)
     configured = await db.read(read_settings)
-    ram_budget = configured["ram_budget_mb"]["value"] or profile.ram_budget_mb
-    vram_budget = configured["vram_budget_mb"]["value"] or profile.vram_budget_mb
+    ram_budget = configured["ram_budget_mb"]["value"] if configured["ram_budget_mb"]["value"] is not None else profile.ram_budget_mb
+    vram_budget = configured["vram_budget_mb"]["value"] if configured["vram_budget_mb"]["value"] is not None else profile.vram_budget_mb
     resources = ResourceManager({"ram_mb": int(ram_budget), "vram_mb": int(vram_budget)}, app.state.providers)
     app.state.resources = resources
+    try:
+        await resources.sync_loaded("ollama", await ollama.loaded_models())
+    except Exception:
+        logging.info("Unable to synchronize loaded Ollama models during startup", exc_info=True)
     app.state.jobs = JobManager(db, app.state.providers, resources)
     await app.state.jobs.start()
     app.state.ready = True

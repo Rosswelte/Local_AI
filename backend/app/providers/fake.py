@@ -11,6 +11,8 @@ class FakeProvider(AIProvider):
         self.memory = memory or {"ram_mb": 100, "vram_mb": 0}
         self.fail = fail
         self.cancelled: set[int] = set()
+        self.loaded_calls: list[tuple[str, bool]] = []
+        self.unloaded_calls: list[str] = []
 
     async def health(self) -> bool:
         return True
@@ -35,3 +37,9 @@ class FakeProvider(AIProvider):
 
     async def cancel(self, job_id: int) -> None:
         self.cancelled.add(job_id)
+
+    async def load(self, name: str, pinned: bool = False) -> None:
+        self.loaded_calls.append((name, pinned))
+
+    async def unload(self, name: str) -> None:
+        self.unloaded_calls.append(name)

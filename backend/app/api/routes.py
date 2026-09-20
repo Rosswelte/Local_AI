@@ -36,6 +36,10 @@ class SettingsIn(BaseModel):
     values: dict[str, Any]
 
 
+class PinIn(BaseModel):
+    pinned: bool = True
+
+
 def state(request: Request):
     return request.app.state
 
@@ -116,8 +120,8 @@ async def update_settings(payload: SettingsIn, request: Request):
     configured = await request.app.state.db.read(read_settings)
     profile = request.app.state.profile
     await request.app.state.resources.update_budgets({
-        "ram_mb": int(configured["ram_budget_mb"]["value"] or profile.ram_budget_mb),
-        "vram_mb": int(configured["vram_budget_mb"]["value"] or profile.vram_budget_mb),
+        "ram_mb": int(configured["ram_budget_mb"]["value"] if configured["ram_budget_mb"]["value"] is not None else profile.ram_budget_mb),
+        "vram_mb": int(configured["vram_budget_mb"]["value"] if configured["vram_budget_mb"]["value"] is not None else profile.vram_budget_mb),
     })
     return configured
 
@@ -153,7 +157,8 @@ async def load_model(model_id: int, request: Request):
     if not model["installed"]:
         raise AppError("model_not_installed", "Installez d'abord ce modèle", 409)
     try:
-        await request.app.state.ollama.load(model["name"], bool(model["pinned"]))
+        estimate = request.app.state.ollama.estimate(model)
+        await request.app.state.resources.load_model("ollama", model, estimate, bool(model["pinned"]))
     except Exception as exc:
         raise AppError("provider_offline", "Impossible de charger le modèle", 503) from exc
     return {"status": "loaded", "model_id": model_id}
@@ -163,10 +168,18 @@ async def load_model(model_id: int, request: Request):
 async def unload_model(model_id: int, request: Request):
     model = await _model(request, model_id)
     try:
-        await request.app.state.ollama.unload(model["name"])
+        await request.app.state.resources.unload("ollama", model["name"])
     except Exception as exc:
         raise AppError("provider_offline", "Impossible de décharger le modèle", 503) from exc
     return {"status": "unloaded", "model_id": model_id}
+
+
+@router.post("/models/{model_id}/pin")
+async def pin_model(model_id: int, payload: PinIn, request: Request):
+    model = await _model(request, model_id)
+    await request.app.state.db.write(lambda con: con.execute("UPDATE models SET pinned=? WHERE id=?", (int(payload.pinned), model_id)))
+    await request.app.state.resources.set_pinned("ollama", model["name"], payload.pinned)
+    return {"model_id": model_id, "pinned": payload.pinned}
 
 
 @router.delete("/models/{model_id}/install")

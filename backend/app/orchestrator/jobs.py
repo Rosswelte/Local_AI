@@ -110,6 +110,8 @@ class JobManager:
             raise AppError("not_found", "Modèle introuvable", 404)
         estimate = provider.estimate(model)
         job["estimate"] = estimate
+        job["model_name"] = model["name"]
+        job["pinned"] = bool(model.get("pinned", 0))
         reservation = await self.resources.acquire(job)
         text = ""
         try:
