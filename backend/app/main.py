@@ -1,4 +1,7 @@
+import base64
+import binascii
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -22,6 +25,7 @@ from app.errors import AppError
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings.from_env()
+    app.state.settings = settings
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db = Database(settings.data_dir / "database" / "orchestrator.db")
     await db.start(Path(__file__).parent / "database" / "migrations")
@@ -40,6 +44,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.info("Ollama is offline during startup", exc_info=True)
     resources = ResourceManager({"ram_mb": profile.ram_budget_mb, "vram_mb": profile.vram_budget_mb}, app.state.providers)
+    app.state.resources = resources
     app.state.jobs = JobManager(db, app.state.providers, resources)
     await app.state.jobs.start()
     app.state.ready = True
@@ -54,6 +59,29 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Orchestrateur IA", lifespan=lifespan)
 app.include_router(router)
+
+
+@app.middleware("http")
+async def external_auth(request: Request, call_next):
+    settings = getattr(request.app.state, "settings", None)
+    protected = settings and settings.expose_host != "127.0.0.1" and request.url.path.startswith("/api/v1")
+    public = request.url.path in {"/api/v1/health", "/api/v1/ready"}
+    if protected and not public:
+        password = request.headers.get("x-admin-password")
+        authorization = request.headers.get("authorization", "")
+        if not password and authorization.lower().startswith("basic "):
+            try:
+                decoded = base64.b64decode(authorization[6:]).decode("utf-8")
+                _, password = decoded.split(":", 1)
+            except (ValueError, UnicodeDecodeError, binascii.Error):
+                password = None
+        if not password or not secrets.compare_digest(password, settings.admin_password):
+            return JSONResponse(
+                status_code=401,
+                headers={"WWW-Authenticate": "Basic realm=orchestrator"},
+                content={"error": {"code": "unauthorized", "message": "Authentification requise", "details": {}}},
+            )
+    return await call_next(request)
 
 
 @app.exception_handler(AppError)

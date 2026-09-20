@@ -27,3 +27,15 @@ async def test_fit_and_confirmation_errors():
         await manager.acquire({"id": 2, "estimate": {"ram_mb": 1, "vram_mb": 0}, "compatibility": "not_recommended"})
     reservation = await manager.acquire({"id": 3, "estimate": {"ram_mb": 1, "vram_mb": 0}, "compatibility": "not_recommended", "force": True})
     await manager.release(reservation)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_waiting_job_wakes_it():
+    manager = ResourceManager({"ram_mb": 100, "vram_mb": 0})
+    first = await manager.acquire({"id": 1, "estimate": {"ram_mb": 100, "vram_mb": 0}})
+    waiting = asyncio.create_task(manager.acquire({"id": 2, "estimate": {"ram_mb": 100, "vram_mb": 0}}))
+    await asyncio.sleep(0)
+    await manager.cancel(2)
+    with pytest.raises(AppError, match="annulé"):
+        await asyncio.wait_for(waiting, 1)
+    await manager.release(first)

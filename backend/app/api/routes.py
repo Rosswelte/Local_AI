@@ -50,6 +50,7 @@ async def detect_hardware(request: Request):
     profile = detect_profile()
     request.app.state.profile = profile
     await request.app.state.db.write(_save_profile, profile)
+    await request.app.state.resources.update_budgets({"ram_mb": profile.ram_budget_mb, "vram_mb": profile.vram_budget_mb})
     return profile.as_dict()
 
 
@@ -88,6 +89,8 @@ async def sync_models(request: Request):
 @router.post("/models/{model_id}/load")
 async def load_model(model_id: int, request: Request):
     model = await _model(request, model_id)
+    if not model["installed"]:
+        raise AppError("model_not_installed", "Installez d'abord ce modèle", 409)
     try:
         await request.app.state.ollama.load(model["name"], bool(model["pinned"]))
     except Exception as exc:
@@ -95,20 +98,35 @@ async def load_model(model_id: int, request: Request):
     return {"status": "loaded", "model_id": model_id}
 
 
-@router.delete("/models/{model_id}/install")
+@router.post("/models/{model_id}/unload")
 async def unload_model(model_id: int, request: Request):
     model = await _model(request, model_id)
+    try:
+        await request.app.state.ollama.unload(model["name"])
+    except Exception as exc:
+        raise AppError("provider_offline", "Impossible de décharger le modèle", 503) from exc
+    return {"status": "unloaded", "model_id": model_id}
+
+
+@router.delete("/models/{model_id}/install")
+async def delete_model(model_id: int, request: Request):
+    model = await _model(request, model_id)
+    active = await request.app.state.db.read(lambda con: con.execute("SELECT id FROM jobs WHERE model_id=? AND state IN ('queued', 'running') LIMIT 1", (model_id,)).fetchone())
+    if active:
+        raise AppError("resource_busy", "Le modèle est utilisé par un job actif", 409, {"job_id": active["id"]})
     try:
         await request.app.state.ollama.delete(model["name"])
     except Exception as exc:
         raise AppError("provider_offline", "Impossible de supprimer le modèle", 503) from exc
     await request.app.state.db.write(lambda con: con.execute("UPDATE models SET installed=0 WHERE id=?", (model_id,)))
-    return {"status": "unloaded", "model_id": model_id}
+    return {"status": "deleted", "model_id": model_id}
 
 
 @router.post("/models/{model_id}/pull")
 async def pull_model(model_id: int, request: Request):
     model = await _model(request, model_id)
+    if model["provider"] != "ollama":
+        raise AppError("provider_unavailable", "Ce modèle n'est pas géré par Ollama", 409)
     job_id = await request.app.state.db.write(create_job, kind="pull", provider="ollama", model_id=model_id, priority=5)
     await request.app.state.jobs.enqueue()
     return {"job_id": job_id}
@@ -139,6 +157,20 @@ async def send_message(conversation_id: int, payload: MessageIn, request: Reques
         conversation = con.execute("SELECT * FROM conversations WHERE id=?", (conversation_id,)).fetchone()
         if not conversation:
             raise AppError("not_found", "Conversation introuvable", 404)
+        if conversation["model_id"] is None:
+            raise AppError("model_required", "Sélectionnez un modèle pour cette conversation", 422)
+        model = con.execute("SELECT * FROM models WHERE id=?", (conversation["model_id"],)).fetchone()
+        if not model:
+            raise AppError("not_found", "Modèle introuvable", 404)
+        if not model["enabled"]:
+            raise AppError("model_disabled", "Le modèle est désactivé", 409)
+        if not model["installed"]:
+            raise AppError("model_not_installed", "Installez d'abord ce modèle", 409)
+        fit = evaluate(dict(model), request.app.state.profile)
+        if fit["level"] == "impossible":
+            raise AppError("fit_impossible", "Les ressources minimales détectées sont insuffisantes", 409, {"missing_mb": fit["missing_mb"]})
+        if fit["level"] == "not_recommended" and not payload.force:
+            raise AppError("confirmation_required", "Ce modèle nécessite une confirmation", 409, {"fit": fit})
         user = con.execute("INSERT INTO messages(conversation_id, role, content, status) VALUES (?, 'user', ?, 'complete')", (conversation_id, payload.content))
         assistant = con.execute("INSERT INTO messages(conversation_id, role, content, status) VALUES (?, 'assistant', '', 'streaming')", (conversation_id,)).lastrowid
         job = con.execute("INSERT INTO jobs(kind, provider, model_id, message_id, force) VALUES ('text', 'ollama', ?, ?, ?)", (conversation["model_id"], assistant, int(payload.force))).lastrowid
@@ -176,14 +208,20 @@ async def cancel_job(job_id: int, request: Request):
 
 @router.get("/jobs/{job_id}/stream")
 async def stream_job(job_id: int, request: Request, last_event_id: str | None = Header(default=None, alias="Last-Event-ID")):
-    exists = await request.app.state.db.read(lambda con: con.execute("SELECT id FROM jobs WHERE id=?", (job_id,)).fetchone())
-    if not exists:
+    job = await request.app.state.db.read(lambda con: con.execute("SELECT id, state, error_code, error_message FROM jobs WHERE id=?", (job_id,)).fetchone())
+    if not job:
         raise AppError("not_found", "Job introuvable", 404)
     after = int(last_event_id or 0)
 
     async def body():
+        sent = False
         async for event in request.app.state.jobs.events.subscribe(job_id, after):
+            sent = True
             yield f"id: {event['id']}\nevent: {event['type']}\ndata: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
+        if not sent and job["state"] in {"completed", "failed", "cancelled"} and not await request.app.state.jobs.events.has_events(job_id):
+            event_type = {"completed": "completed", "cancelled": "cancelled", "failed": "error"}[job["state"]]
+            data = {} if event_type != "error" else {"code": job["error_code"], "message": job["error_message"]}
+            yield f"id: 1\nevent: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

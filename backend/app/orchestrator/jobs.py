@@ -27,8 +27,10 @@ def take_next_job(con):
 
 
 def restart_jobs(con):
-    con.execute("UPDATE jobs SET state='failed', error_code='interrupted', error_message='Processus interrompu', finished_at=CURRENT_TIMESTAMP WHERE state='running' AND kind='text'")
-    con.execute("UPDATE jobs SET state='queued' WHERE state='running' AND kind <> 'text'")
+    con.execute("""UPDATE messages SET status='error', updated_at=CURRENT_TIMESTAMP
+        WHERE id IN (SELECT message_id FROM jobs WHERE state='running' AND kind IN ('text', 'agent') AND message_id IS NOT NULL)""")
+    con.execute("UPDATE jobs SET state='failed', error_code='interrupted', error_message='Processus interrompu', finished_at=CURRENT_TIMESTAMP WHERE state='running' AND kind IN ('text', 'agent')")
+    con.execute("UPDATE jobs SET state='queued' WHERE state='running' AND kind NOT IN ('text', 'agent')")
 
 
 class JobManager:
@@ -61,16 +63,19 @@ class JobManager:
                 raise AppError("not_found", "Job introuvable", 404)
             if row["state"] == "queued":
                 con.execute("UPDATE jobs SET state='cancelled', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
+                return "queued"
             elif row["state"] == "running":
                 con.execute("UPDATE jobs SET cancel_requested=1 WHERE id=?", (job_id,))
-                return row["provider"]
-            return None
+                return "running", row["provider"]
+            return row["state"], None
 
-        provider = await self.db.write(update)
-        if provider:
-            await self.providers[provider].cancel(job_id)
-        await self._emit(job_id, "cancelled", {})
-        await self.events.finish(job_id)
+        result = await self.db.write(update)
+        if result == "queued":
+            await self._emit(job_id, "cancelled", {})
+            await self.events.finish(job_id)
+        elif isinstance(result, tuple) and result[0] == "running":
+            await self.resources.cancel(job_id)
+            await self.providers[result[1]].cancel(job_id)
         self._wake.set()
 
     async def _worker(self) -> None:
@@ -86,9 +91,14 @@ class JobManager:
             try:
                 await self._run_job(job)
             except Exception as exc:
-                await self.db.write(lambda con: con.execute("UPDATE jobs SET state='failed', error_code=?, error_message=?, finished_at=CURRENT_TIMESTAMP WHERE id=?", (getattr(exc, "code", "provider_error"), str(exc), job["id"])))
-                await self._set_message(job, job.get("_partial_text", ""), "error")
-                await self._emit(job["id"], "error", {"message": str(exc)})
+                if getattr(exc, "code", None) == "cancelled":
+                    await self.db.write(lambda con: con.execute("UPDATE jobs SET state='cancelled', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],)))
+                    await self._set_message(job, job.get("_partial_text", ""), "cancelled")
+                    await self._emit(job["id"], "cancelled", {})
+                else:
+                    await self.db.write(lambda con: con.execute("UPDATE jobs SET state='failed', error_code=?, error_message=?, finished_at=CURRENT_TIMESTAMP WHERE id=?", (getattr(exc, "code", "provider_error"), str(exc), job["id"])))
+                    await self._set_message(job, job.get("_partial_text", ""), "error")
+                    await self._emit(job["id"], "error", {"message": str(exc)})
             finally:
                 await self.events.finish(job["id"])
 
@@ -96,7 +106,8 @@ class JobManager:
         provider = self.providers[job["provider"]]
         model = await self.db.read(lambda con, model_id: _row(con.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()), job["model_id"])
         messages = await self.db.read(lambda con, message_id: _messages_for_job(con, message_id), job["message_id"])
-        model = model or {"name": "fake"}
+        if not model:
+            raise AppError("not_found", "Modèle introuvable", 404)
         estimate = provider.estimate(model)
         job["estimate"] = estimate
         reservation = await self.resources.acquire(job)
@@ -115,9 +126,15 @@ class JobManager:
                     job["_partial_text"] = text
                     await self._append_message(job, text)
                 elif event.type == "progress":
-                    progress = int(event.data if isinstance(event.data, int) else 0)
+                    progress = _progress_value(event.data)
                     await self.db.write(lambda con, p: con.execute("UPDATE jobs SET progress=? WHERE id=?", (p, job["id"])), progress)
                 await self._emit(job["id"], event.type, event.data)
+            cancelled = await self.db.read(lambda con, job_id: bool(con.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()[0]), job["id"])
+            if cancelled:
+                await self.db.write(lambda con: con.execute("UPDATE jobs SET state='cancelled', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],)))
+                await self._set_message(job, text, "cancelled")
+                await self._emit(job["id"], "cancelled", {})
+                return
             await self._set_message(job, text, "complete")
             await self.db.write(lambda con: con.execute("UPDATE jobs SET state='completed', progress=100, finished_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],)))
             if job["kind"] == "pull":
@@ -146,3 +163,11 @@ def _messages_for_job(con, message_id):
     if not row:
         return []
     return [dict(item) for item in con.execute("SELECT role, content FROM messages WHERE conversation_id=? AND id < ? ORDER BY id", (row["conversation_id"], message_id)).fetchall()]
+
+
+def _progress_value(data: Any) -> int:
+    if isinstance(data, int):
+        return max(0, min(100, data))
+    if isinstance(data, dict) and data.get("total"):
+        return max(0, min(100, int(int(data.get("completed", 0)) * 100 / int(data["total"]))))
+    return 0

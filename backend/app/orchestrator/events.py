@@ -22,6 +22,10 @@ class EventHub:
             for queue in list(self._queues[job_id]):
                 await queue.put(None)
 
+    async def has_events(self, job_id: int) -> bool:
+        async with self._lock:
+            return bool(self._events[job_id])
+
     async def subscribe(self, job_id: int, after: int = 0) -> AsyncIterator[dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         async with self._lock:
