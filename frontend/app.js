@@ -1,0 +1,10 @@
+let conversationId = null;
+let modelId = null;
+const $ = (id) => document.getElementById(id);
+async function get(path){const response=await fetch(`/api/v1${path}`);return response.json()}
+async function refresh(){const [models, conversations]=await Promise.all([get('/models'),get('/conversations')]);$('models').innerHTML=models.map(m=>`<div class="model"><button data-model="${m.id}"><strong>${m.label}</strong><br><span class="level">${m.fit.level} · estimé${m.loaded?' · chargé':''}</span></button></div>`).join('');$('conversations').innerHTML=conversations.map(c=>`<div class="conversation"><button data-conversation="${c.id}">${c.title}</button></div>`).join('');document.querySelectorAll('[data-model]').forEach(b=>b.onclick=()=>modelId=Number(b.dataset.model));document.querySelectorAll('[data-conversation]').forEach(b=>b.onclick=()=>openConversation(Number(b.dataset.conversation)));}
+async function openConversation(id){conversationId=id;const messages=await get(`/conversations/${id}/messages`);$('messages').innerHTML=messages.map(m=>`<div class="message ${m.role}">${escapeHtml(m.content)}</div>`).join('');}
+function escapeHtml(value){return value.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+$('new-conversation').onclick=async()=>{const c=await fetch('/api/v1/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model_id:modelId})}).then(r=>r.json());conversationId=c.id;await refresh();};
+$('message-form').onsubmit=async(e)=>{e.preventDefault();if(!conversationId)return;const result=await fetch(`/api/v1/conversations/${conversationId}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:$('content').value})}).then(r=>r.json());$('content').value='';const source=new EventSource(`/api/v1/jobs/${result.job_id}/stream`);source.addEventListener('token',()=>openConversation(conversationId));source.addEventListener('completed',()=>{source.close();openConversation(conversationId)});source.addEventListener('error',()=>source.close());};
+refresh();

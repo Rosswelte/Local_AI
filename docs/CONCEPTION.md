@@ -1,0 +1,10 @@
+# Conception V1
+
+Cette copie décrit l'implémentation livrée dans ce workspace. La conception
+v11 référencée par le guide n'était pas présente dans le répertoire initial.
+
+La V1 utilise un seul worker Uvicorn, une connexion SQLite d'écriture confinée
+à un thread, un catalogue YAML synchronisé sans écraser l'état local, un
+provider Ollama asynchrone et un tampon SSE en mémoire limité à 200 événements
+par job. Les jobs `text` interrompus sont marqués `failed/interrupted` au
+redémarrage; les jobs non textuels sont remis en file.
