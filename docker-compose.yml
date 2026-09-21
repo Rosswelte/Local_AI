@@ -8,7 +8,7 @@ services:
     environment:
       DATA_DIR: /data
       OLLAMA_URL: http://ollama:11434
-      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
+      COMFYUI_URL: ${COMFYUI_URL:-http://comfyui:8188}
       EXPOSE_HOST: ${EXPOSE_HOST:-127.0.0.1}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -29,5 +29,19 @@ services:
       - ollama:/root/.ollama
     ports:
       - "127.0.0.1:11434:11434"
+  comfyui:
+    # Image epinglee cu126 (CUDA 12.6) : les images cu130 ne supportent pas
+    # Maxwell (GeForce 840M). Pull d'environ 10 Go, a lancer manuellement.
+    image: yanwk/comfyui-boot:cu126-slim
+    environment:
+      CLI_ARGS: ${COMFYUI_CLI_ARGS:-}
+    volumes:
+      - ./comfyui/storage:/root
+      - ./comfyui/models:/root/ComfyUI/models
+      - ./comfyui/input:/root/ComfyUI/input
+      - ./comfyui/output:/root/ComfyUI/output
+      - ./comfyui/workflows:/root/ComfyUI/user/default/workflows
+    ports:
+      - "127.0.0.1:8188:8188"
 volumes:
   ollama:

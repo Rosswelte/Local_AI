@@ -1,4 +1,5 @@
 data/
+comfyui/
 .env
 .venv/
 __pycache__/
