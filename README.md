@@ -1,7 +1,8 @@
 # Orchestrateur IA
 
-Orchestrateur local FastAPI pour Ollama, avec SQLite, catalogue de modeles,
-jobs, chat SSE, services distants chiffres et suivi des ressources.
+Orchestrateur local FastAPI pour Ollama et ComfyUI, avec SQLite, catalogue de
+modeles, jobs, chat SSE, generations image, services distants chiffres et
+suivi des ressources.
 
 ## Fonctionnalites V2.6
 
@@ -77,4 +78,27 @@ par l'API.
 PYTHONPATH=backend .venv/bin/python -m pytest -q backend/tests
 ```
 
-La suite actuelle contient 25 tests.
+La suite actuelle contient 36 tests.
+
+## V3.1 en cours
+
+La branche `v3` ajoute la generation image via un provider ComfyUI HTTP. Le
+workflow `reference` est versionne dans `backend/catalog/workflows/` et les
+sorties sont conservees sous `DATA_DIR/outputs/{job_id}`.
+
+Configuration :
+
+```bash
+COMFYUI_URL=http://127.0.0.1:8188
+```
+
+Routes image :
+
+- `GET /api/v1/image/workflows` : workflows controles disponibles.
+- `POST /api/v1/image/jobs` : creation d'un job image.
+- `GET /api/v1/jobs/{id}/stream` : progression et sorties SSE.
+- `GET /api/v1/image/jobs/{id}/outputs` : metadonnees des sorties.
+- `GET /api/v1/image/jobs/{id}/outputs/{output_id}` : fichier image controle.
+
+Le conteneur ComfyUI et les checkpoints ne sont pas telecharges par le projet
+pour l'instant; ils seront valides dans une etape d'integration separee.

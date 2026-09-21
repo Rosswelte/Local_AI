@@ -3,13 +3,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.errors import AppError
 from app.hardware.compatibility import evaluate
 from app.orchestrator.jobs import create_job
 from app.providers.openai_compatible import validate_headers
+from app.services.image_outputs import output_path
+from app.services.image_workflows import apply_overrides, list_workflows, load_workflow
 
 
 router = APIRouter(prefix="/api/v1")
@@ -50,6 +52,16 @@ class ServiceIn(BaseModel):
     api_key: str = Field(min_length=1, max_length=4096)
     type: str = "llm"
     extra_headers: dict[str, str] = {}
+
+
+class ImageJobIn(BaseModel):
+    workflow_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    prompt: str = Field(min_length=1, max_length=4000)
+    seed: int | None = Field(default=None, ge=0)
+    steps: int = Field(default=20, ge=1, le=100)
+    cfg: float = Field(default=7.0, ge=0, le=30)
+    width: int = Field(default=1024, ge=64, le=2048, multiple_of=8)
+    height: int = Field(default=1024, ge=64, le=2048, multiple_of=8)
 
 
 def state(request: Request):
@@ -112,6 +124,64 @@ async def services(request: Request):
         {key: value for key, value in dict(row).items() if key not in {"api_key_enc", "extra_headers_enc"}}
         for row in con.execute("SELECT * FROM services ORDER BY id")
     ])
+
+
+@router.get("/image/workflows")
+async def image_workflows():
+    return list_workflows()
+
+
+@router.post("/image/jobs")
+async def create_image_job(payload: ImageJobIn, request: Request):
+    if "comfyui" not in request.app.state.providers:
+        raise AppError("provider_unavailable", "Le provider ComfyUI n'est pas configuré", 503)
+    try:
+        workflow = load_workflow(payload.workflow_id)
+    except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError) as exc:
+        raise AppError("workflow_not_found", "Workflow ComfyUI introuvable", 404) from exc
+    workflow = apply_overrides(
+        workflow,
+        prompt=payload.prompt,
+        seed=payload.seed,
+        steps=payload.steps,
+        cfg=payload.cfg,
+        width=payload.width,
+        height=payload.height,
+    )
+    job_id = await request.app.state.db.write(
+        create_job,
+        kind="image",
+        provider="comfyui",
+        input_data={"workflow_id": payload.workflow_id, "workflow": workflow},
+    )
+    await request.app.state.jobs.enqueue()
+    return {"job_id": job_id, "workflow_id": payload.workflow_id}
+
+
+@router.get("/image/jobs/{job_id}/outputs")
+async def image_outputs(job_id: int, request: Request):
+    job = await request.app.state.db.read(lambda con, value: con.execute("SELECT id, kind, state, output FROM jobs WHERE id=?", (value,)).fetchone(), job_id)
+    if not job:
+        raise AppError("not_found", "Job introuvable", 404)
+    if job["kind"] != "image":
+        raise AppError("invalid_job", "Ce job n'est pas un job image", 409)
+    return {"job_id": job_id, "state": job["state"], "outputs": json.loads(job["output"] or "[]")}
+
+
+@router.get("/image/jobs/{job_id}/outputs/{output_id}")
+async def image_output_file(job_id: int, output_id: int, request: Request):
+    job = await request.app.state.db.read(lambda con, value: con.execute("SELECT kind, output FROM jobs WHERE id=?", (value,)).fetchone(), job_id)
+    if not job:
+        raise AppError("not_found", "Job introuvable", 404)
+    if job["kind"] != "image":
+        raise AppError("invalid_job", "Ce job n'est pas un job image", 409)
+    metadata = next((item for item in json.loads(job["output"] or "[]") if int(item.get("id", -1)) == output_id), None)
+    if not metadata:
+        raise AppError("not_found", "Sortie image introuvable", 404)
+    path = output_path(request.app.state.settings.data_dir, job_id, metadata)
+    if not path.is_file():
+        raise AppError("not_found", "Fichier image introuvable", 404)
+    return FileResponse(path, media_type=metadata["media_type"], filename=metadata["name"])
 
 
 @router.get("/services/status")

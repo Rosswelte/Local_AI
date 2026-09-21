@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from app.errors import AppError
@@ -10,14 +11,18 @@ from app.orchestrator.resource_manager import ResourceManager
 from app.orchestrator.scheduler import Scheduler
 from app.orchestrator.memory_guard import MemoryGuard
 from app.providers.base import AIProvider
+from app.services.image_outputs import save_output
 
 
 def _row(row):
     return dict(row) if row else None
 
 
-def create_job(con, *, kind="text", provider="ollama", model_id=None, message_id=None, priority=10, force=False):
-    cursor = con.execute("INSERT INTO jobs(kind, provider, model_id, message_id, priority, force) VALUES (?, ?, ?, ?, ?, ?)", (kind, provider, model_id, message_id, priority, int(force)))
+def create_job(con, *, kind="text", provider="ollama", model_id=None, message_id=None, conversation_id=None, priority=10, force=False, input_data=None):
+    cursor = con.execute(
+        "INSERT INTO jobs(kind, provider, model_id, message_id, conversation_id, priority, force, input) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (kind, provider, model_id, message_id, conversation_id, priority, int(force), json.dumps(input_data or {})),
+    )
     return cursor.lastrowid
 
 
@@ -37,12 +42,13 @@ def restart_jobs(con):
 
 
 class JobManager:
-    def __init__(self, db, providers: dict[str, AIProvider], resource_manager: ResourceManager, scheduler: Scheduler | None = None, memory_guard_percent: float = 5.0):
+    def __init__(self, db, providers: dict[str, AIProvider], resource_manager: ResourceManager, scheduler: Scheduler | None = None, memory_guard_percent: float = 5.0, data_dir: str | Path = "."):
         self.db = db
         self.providers = providers
         self.resources = resource_manager
         self.scheduler = scheduler or Scheduler()
         self.memory_guard_percent = memory_guard_percent
+        self.data_dir = Path(data_dir)
         self.events = EventHub()
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -131,6 +137,9 @@ class JobManager:
 
     async def _run_job(self, job: dict[str, Any]) -> None:
         provider = self.providers[job["provider"]]
+        if job["kind"] == "image":
+            await self._run_image_job(job, provider)
+            return
         model = await self.db.read(lambda con, model_id: _row(con.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()), job["model_id"])
         messages = await self.db.read(lambda con, message_id: _messages_for_job(con, message_id), job["message_id"])
         if not model:
@@ -185,6 +194,45 @@ class JobManager:
                 guard_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await guard_task
+            await self.resources.release(reservation)
+
+    async def _run_image_job(self, job: dict[str, Any], provider) -> None:
+        payload = json.loads(job.get("input") or "{}")
+        workflow = payload.get("workflow")
+        if not isinstance(workflow, dict):
+            raise AppError("invalid_input", "Workflow image invalide", 422)
+        job["estimate"] = provider.estimate(payload)
+        job["model_name"] = ""
+        reservation = await self.resources.acquire(job)
+        outputs = []
+        try:
+            async for event in provider.run_image(workflow, int(job["id"])):
+                cancelled = await self.db.read(lambda con, job_id: bool(con.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()[0]), job["id"])
+                if cancelled:
+                    with contextlib.suppress(Exception):
+                        await provider.cancel(job["id"])
+                    await self.db.write(lambda con: con.execute("UPDATE jobs SET state='cancelled', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],)))
+                    await self._emit(job["id"], "cancelled", {})
+                    return
+                if event.type == "progress":
+                    progress = _progress_value(event.data)
+                    await self.db.write(lambda con, p: con.execute("UPDATE jobs SET progress=? WHERE id=?", (p, job["id"])), progress)
+                    await self._emit(job["id"], event.type, event.data)
+                elif event.type == "output":
+                    content, media_type = await provider.download_output(event.data)
+                    metadata = await asyncio.to_thread(save_output, self.data_dir, int(job["id"]), len(outputs) + 1, content, media_type)
+                    outputs.append(metadata)
+                    await self._emit(job["id"], "output", metadata)
+                else:
+                    await self._emit(job["id"], event.type, event.data)
+            await self.db.write(
+                lambda con, value: con.execute(
+                    "UPDATE jobs SET output=?, state='completed', progress=100, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (json.dumps(value), job["id"]),
+                ),
+                outputs,
+            )
+        finally:
             await self.resources.release(reservation)
 
     async def _emit(self, job_id: int, event_type: str, data: Any) -> None:

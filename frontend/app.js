@@ -57,6 +57,68 @@ function appendToken(event) {
   assistantElement.textContent += JSON.parse(event.data);
 }
 
+function parseEventData(event) {
+  return event.data ? JSON.parse(event.data) : {};
+}
+
+async function refreshImageWorkflows() {
+  const workflows = await get("/image/workflows");
+  $("image-workflow").innerHTML = workflows.map((workflow) => `
+    <option value="${escapeHtml(workflow.id)}">${escapeHtml(workflow.label)}</option>
+  `).join("");
+}
+
+function addImageOutput(output) {
+  const image = document.createElement("img");
+  image.src = output.url;
+  image.alt = output.name;
+  image.loading = "lazy";
+  $("image-results").appendChild(image);
+}
+
+async function generateImage() {
+  const seed = $("image-seed").value;
+  const response = await fetch("/api/v1/image/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workflow_id: $("image-workflow").value,
+      prompt: $("image-prompt").value,
+      seed: seed ? Number(seed) : null,
+      steps: Number($("image-steps").value),
+      cfg: Number($("image-cfg").value),
+      width: 1024,
+      height: 1024,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    $("image-status").textContent = result.error?.message || "La génération image a échoué";
+    return;
+  }
+  $("image-results").innerHTML = "";
+  $("image-status").textContent = "Génération en cours...";
+  const source = new EventSource(`/api/v1/jobs/${result.job_id}/stream`);
+  source.addEventListener("progress", (event) => {
+    const data = parseEventData(event);
+    $("image-status").textContent = data.status || "Génération en cours...";
+  });
+  source.addEventListener("output", (event) => addImageOutput(parseEventData(event)));
+  source.addEventListener("completed", () => {
+    source.close();
+    $("image-status").textContent = "Génération terminée";
+  });
+  source.addEventListener("cancelled", () => {
+    source.close();
+    $("image-status").textContent = "Génération annulée";
+  });
+  source.addEventListener("error", (event) => {
+    source.close();
+    const data = parseEventData(event);
+    $("image-status").textContent = data.message || "Erreur pendant la génération";
+  });
+}
+
 $("new-conversation").onclick = async () => {
   if (modelId === null) {
     alert("Aucun modèle installé n'est disponible");
@@ -119,4 +181,9 @@ $("message-form").onsubmit = async (event) => {
   await submitMessage();
 };
 
-refresh();
+$("generate-image").onclick = generateImage;
+
+Promise.all([refresh(), refreshImageWorkflows()]).catch((error) => {
+  console.error(error);
+  $("image-status").textContent = "Impossible de charger les workflows image";
+});

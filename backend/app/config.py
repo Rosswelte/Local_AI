@@ -7,6 +7,7 @@ from pathlib import Path
 class Settings:
     data_dir: Path
     ollama_url: str
+    comfyui_url: str
     expose_host: str
     admin_password: str
     log_level: str
@@ -22,6 +23,7 @@ class Settings:
         return cls(
             data_dir=data_dir,
             ollama_url=os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/"),
+            comfyui_url=os.getenv("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/"),
             expose_host=expose_host,
             admin_password=admin_password,
             log_level=os.getenv("LOG_LEVEL", "info"),
