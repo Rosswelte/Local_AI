@@ -27,10 +27,13 @@ function renderMessages(messages) {
 
 async function refresh() {
   const [models, conversations] = await Promise.all([get("/models"), get("/conversations")]);
+  if (modelId === null) {
+    modelId = models.find((model) => model.installed && model.enabled)?.id ?? null;
+  }
   $("models").innerHTML = models.map((model) => `
-    <div class="model"><button data-model="${model.id}">
+    <div class="model"><button data-model="${model.id}" ${model.installed && model.enabled ? "" : "disabled"}>
       <strong>${escapeHtml(model.label)}</strong><br>
-      <span class="level">${escapeHtml(model.fit.level)} · estimé${model.loaded ? " · chargé" : ""}</span>
+      <span class="level">${model.installed ? `${escapeHtml(model.fit.level)} · estimé${model.loaded ? " · chargé" : ""}` : "non installé"}</span>
     </button></div>
   `).join("");
   $("conversations").innerHTML = conversations.map((conversation) => `
@@ -55,6 +58,10 @@ function appendToken(event) {
 }
 
 $("new-conversation").onclick = async () => {
+  if (modelId === null) {
+    alert("Aucun modèle installé n'est disponible");
+    return;
+  }
   const response = await fetch("/api/v1/conversations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
