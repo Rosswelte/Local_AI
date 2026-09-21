@@ -341,7 +341,8 @@ async def send_message(conversation_id: int, payload: MessageIn, request: Reques
             raise AppError("confirmation_required", "Ce modèle nécessite une confirmation", 409, {"fit": fit})
         user = con.execute("INSERT INTO messages(conversation_id, role, content, status) VALUES (?, 'user', ?, 'complete')", (conversation_id, payload.content))
         assistant = con.execute("INSERT INTO messages(conversation_id, role, content, status) VALUES (?, 'assistant', '', 'streaming')", (conversation_id,)).lastrowid
-        job = con.execute("INSERT INTO jobs(kind, provider, model_id, message_id, force) VALUES ('text', ?, ?, ?, ?)", (provider_name, conversation["model_id"], assistant, int(payload.force))).lastrowid
+        guard = int(fit["level"] == "not_recommended" and payload.force)
+        job = con.execute("INSERT INTO jobs(kind, provider, model_id, message_id, force, memory_guard) VALUES ('text', ?, ?, ?, ?, ?)", (provider_name, conversation["model_id"], assistant, int(payload.force), guard)).lastrowid
         con.execute("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (conversation_id,))
         return {"message_id": assistant, "job_id": job}
     result = await request.app.state.db.write(insert)

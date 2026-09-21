@@ -8,6 +8,7 @@ DEFAULTS: dict[str, tuple[Any, str]] = {
     "allow_parallel": (None, "limits"),
     "idle_unload_minutes": (5, "limits"),
     "min_free_ram_percent": (None, "limits"),
+    "remote_monthly_token_limit": (None, "limits"),
     "remote_warn_before_send": (True, "features"),
     "web_enabled": (False, "features"),
     "language": ("fr", "appearance"),

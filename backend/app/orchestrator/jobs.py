@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -7,6 +8,7 @@ from app.errors import AppError
 from app.orchestrator.events import EventHub
 from app.orchestrator.resource_manager import ResourceManager
 from app.orchestrator.scheduler import Scheduler
+from app.orchestrator.memory_guard import MemoryGuard
 from app.providers.base import AIProvider
 
 
@@ -35,11 +37,12 @@ def restart_jobs(con):
 
 
 class JobManager:
-    def __init__(self, db, providers: dict[str, AIProvider], resource_manager: ResourceManager, scheduler: Scheduler | None = None):
+    def __init__(self, db, providers: dict[str, AIProvider], resource_manager: ResourceManager, scheduler: Scheduler | None = None, memory_guard_percent: float = 5.0):
         self.db = db
         self.providers = providers
         self.resources = resource_manager
         self.scheduler = scheduler or Scheduler()
+        self.memory_guard_percent = memory_guard_percent
         self.events = EventHub()
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -138,6 +141,17 @@ class JobManager:
         job["pinned"] = bool(model.get("pinned", 0))
         reservation = await self.resources.acquire(job)
         text = ""
+        guard_stop = asyncio.Event()
+        guard_task = None
+        if job.get("memory_guard"):
+            guard = MemoryGuard(self.memory_guard_percent)
+
+            async def stop_for_memory():
+                await self.db.write(lambda con: con.execute("UPDATE jobs SET cancel_requested=1 WHERE id=?", (job["id"],)))
+                await self._emit(job["id"], "warning", {"code": "memory_guard", "message": "RAM libre sous le seuil; annulation du job"})
+                await provider.cancel(job["id"])
+
+            guard_task = asyncio.create_task(guard.watch(guard_stop, stop_for_memory), name=f"memory-guard-{job['id']}")
         try:
             stream = provider.pull(model["name"]) if job["kind"] == "pull" and hasattr(provider, "pull") else provider.run(model, messages, {"job_id": job["id"]})
             async for event in stream:
@@ -166,6 +180,11 @@ class JobManager:
             if job["kind"] == "pull":
                 await self.db.write(lambda con: con.execute("UPDATE models SET installed=1 WHERE id=?", (job["model_id"],)))
         finally:
+            if guard_task:
+                guard_stop.set()
+                guard_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await guard_task
             await self.resources.release(reservation)
 
     async def _emit(self, job_id: int, event_type: str, data: Any) -> None:

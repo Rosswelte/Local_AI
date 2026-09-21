@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 
@@ -26,6 +27,19 @@ def evaluate(model: Any, profile: Any, budgets: dict[str, int] | None = None) ->
     if ram_need > ram_budget * 0.9 or (vram_need and vram_need > vram_budget * 0.9):
         return {"level": "not_recommended", "source": "estimated", "reason": "Le modèle utilise presque tout le budget", "missing_mb": 0}
     perf = _value(model, "perf", {}) or {}
-    cpu_speed = float(perf.get("cpu_tokens_s", 0)) if isinstance(perf, dict) else 0
-    level = "fast" if cpu_speed >= 6 else "usable"
-    return {"level": level, "source": "estimated", "reason": "Mémoire et vitesse estimées compatibles", "missing_mb": 0}
+    if isinstance(perf, str):
+        try:
+            perf = json.loads(perf)
+        except json.JSONDecodeError:
+            perf = {}
+    measured = isinstance(perf, dict) and perf.get("tokens_per_s") is not None
+    speed = float(perf.get("tokens_per_s" if measured else "cpu_tokens_s", 0)) if isinstance(perf, dict) else 0
+    if measured:
+        level = "fast" if speed >= 20 else "usable" if speed >= 8 else "slow" if speed >= 2 else "not_recommended"
+        source = "measured"
+        reason = "Vitesse mesurée sur cette machine"
+    else:
+        level = "fast" if speed >= 6 else "usable"
+        source = "estimated"
+        reason = "Mémoire et vitesse estimées compatibles"
+    return {"level": level, "source": source, "reason": reason, "missing_mb": 0}

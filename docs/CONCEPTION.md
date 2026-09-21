@@ -16,7 +16,9 @@ avancé et le chiffrement des secrets restent les prochains jalons. La migration
 scheduler peut démarrer plusieurs workers lorsque `allow_parallel` est activé.
 V2.4 ajoute le stockage chiffré des clés hors base, le provider
 OpenAI-compatible, les en-têtes contrôlés et l'avertissement avant un envoi
-distant.
+distant. La migration `004_safety_benchmark.sql` ajoute le garde-fou RAM pour
+les jobs forcés et les benchmarks enregistrent désormais une vitesse mesurée
+dans `models.perf`.
 
 La V1 utilise un seul worker Uvicorn, une connexion SQLite d'écriture confinée
 à un thread, un catalogue YAML synchronisé sans écraser l'état local, un

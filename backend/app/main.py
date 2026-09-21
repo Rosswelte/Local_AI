@@ -64,8 +64,10 @@ async def lifespan(app: FastAPI):
         logging.info("Unable to synchronize loaded Ollama models during startup", exc_info=True)
     allow_parallel = configured["allow_parallel"]["value"]
     worker_count = 2 if allow_parallel is True else 1
+    memory_guard_percent = configured["min_free_ram_percent"]["value"]
+    memory_guard_percent = float(memory_guard_percent if memory_guard_percent is not None else 5)
     app.state.scheduler = Scheduler(worker_count)
-    app.state.jobs = JobManager(db, app.state.providers, resources, app.state.scheduler)
+    app.state.jobs = JobManager(db, app.state.providers, resources, app.state.scheduler, memory_guard_percent)
     await app.state.jobs.start()
     app.state.ready = True
     try:
