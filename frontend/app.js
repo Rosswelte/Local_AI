@@ -65,16 +65,30 @@ $("new-conversation").onclick = async () => {
   await refresh();
 };
 
-$("message-form").onsubmit = async (event) => {
-  event.preventDefault();
+async function submitMessage(options = {}) {
   if (!conversationId) return;
   const response = await fetch(`/api/v1/conversations/${conversationId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content: $("content").value }),
+    body: JSON.stringify({ content: $("content").value, ...options }),
   });
   const result = await response.json();
-  if (!response.ok) return;
+  if (!response.ok) {
+    const error = result.error || {};
+    const details = error.details || {};
+    if (error.code === "confirmation_required" && details.fit) {
+      if (confirm(`${error.message}. Continuer malgré la recommandation mémoire ?`)) {
+        return submitMessage({ ...options, force: true });
+      }
+    } else if (error.code === "confirmation_required" && details.remote) {
+      if (confirm(`${error.message}. Continuer ?`)) {
+        return submitMessage({ ...options, allow_remote: true });
+      }
+    } else {
+      alert(error.message || "La requête a échoué");
+    }
+    return;
+  }
   $("content").value = "";
   await openConversation(conversationId);
   const source = new EventSource(`/api/v1/jobs/${result.job_id}/stream`);
@@ -91,6 +105,11 @@ $("message-form").onsubmit = async (event) => {
     source.close();
     await openConversation(conversationId);
   });
+}
+
+$("message-form").onsubmit = async (event) => {
+  event.preventDefault();
+  await submitMessage();
 };
 
 refresh();
