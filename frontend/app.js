@@ -1,10 +1,96 @@
 let conversationId = null;
 let modelId = null;
+let assistantElement = null;
+
 const $ = (id) => document.getElementById(id);
-async function get(path){const response=await fetch(`/api/v1${path}`);return response.json()}
-async function refresh(){const [models, conversations]=await Promise.all([get('/models'),get('/conversations')]);$('models').innerHTML=models.map(m=>`<div class="model"><button data-model="${m.id}"><strong>${escapeHtml(m.label)}</strong><br><span class="level">${escapeHtml(m.fit.level)} · estimé${m.loaded?' · chargé':''}</span></button></div>`).join('');$('conversations').innerHTML=conversations.map(c=>`<div class="conversation"><button data-conversation="${c.id}">${escapeHtml(c.title)}</button></div>`).join('');document.querySelectorAll('[data-model]').forEach(b=>b.onclick=()=>modelId=Number(b.dataset.model));document.querySelectorAll('[data-conversation]').forEach(b=>b.onclick=()=>openConversation(Number(b.dataset.conversation)));}
-async function openConversation(id){conversationId=id;const messages=await get(`/conversations/${id}/messages`);$('messages').innerHTML=messages.map(m=>`<div class="message ${m.role}">${escapeHtml(m.content)}</div>`).join('');}
-function escapeHtml(value){return value.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-$('new-conversation').onclick=async()=>{const c=await fetch('/api/v1/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model_id:modelId})}).then(r=>r.json());conversationId=c.id;await refresh();};
-$('message-form').onsubmit=async(e)=>{e.preventDefault();if(!conversationId)return;const result=await fetch(`/api/v1/conversations/${conversationId}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:$('content').value})}).then(r=>r.json());$('content').value='';const source=new EventSource(`/api/v1/jobs/${result.job_id}/stream`);source.addEventListener('token',()=>openConversation(conversationId));source.addEventListener('completed',()=>{source.close();openConversation(conversationId)});source.addEventListener('error',()=>source.close());};
+
+async function get(path) {
+  const response = await fetch(`/api/v1${path}`);
+  return response.json();
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>]/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+  }[character]));
+}
+
+function renderMessages(messages) {
+  $("messages").innerHTML = messages.map((message) => `
+    <div class="message ${escapeHtml(message.role)}" data-message-id="${message.id}">${escapeHtml(message.content)}</div>
+  `).join("");
+  const streaming = messages.find((message) => message.role === "assistant" && message.status === "streaming");
+  assistantElement = streaming ? document.querySelector(`[data-message-id="${streaming.id}"]`) : null;
+}
+
+async function refresh() {
+  const [models, conversations] = await Promise.all([get("/models"), get("/conversations")]);
+  $("models").innerHTML = models.map((model) => `
+    <div class="model"><button data-model="${model.id}">
+      <strong>${escapeHtml(model.label)}</strong><br>
+      <span class="level">${escapeHtml(model.fit.level)} · estimé${model.loaded ? " · chargé" : ""}</span>
+    </button></div>
+  `).join("");
+  $("conversations").innerHTML = conversations.map((conversation) => `
+    <div class="conversation"><button data-conversation="${conversation.id}">${escapeHtml(conversation.title)}</button></div>
+  `).join("");
+  document.querySelectorAll("[data-model]").forEach((button) => {
+    button.onclick = () => { modelId = Number(button.dataset.model); };
+  });
+  document.querySelectorAll("[data-conversation]").forEach((button) => {
+    button.onclick = () => openConversation(Number(button.dataset.conversation));
+  });
+}
+
+async function openConversation(id) {
+  conversationId = id;
+  renderMessages(await get(`/conversations/${id}/messages`));
+}
+
+function appendToken(event) {
+  if (!assistantElement) return;
+  assistantElement.textContent += JSON.parse(event.data);
+}
+
+$("new-conversation").onclick = async () => {
+  const response = await fetch("/api/v1/conversations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_id: modelId }),
+  });
+  const conversation = await response.json();
+  conversationId = conversation.id;
+  await refresh();
+};
+
+$("message-form").onsubmit = async (event) => {
+  event.preventDefault();
+  if (!conversationId) return;
+  const response = await fetch(`/api/v1/conversations/${conversationId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: $("content").value }),
+  });
+  const result = await response.json();
+  if (!response.ok) return;
+  $("content").value = "";
+  await openConversation(conversationId);
+  const source = new EventSource(`/api/v1/jobs/${result.job_id}/stream`);
+  source.addEventListener("token", appendToken);
+  source.addEventListener("completed", async () => {
+    source.close();
+    await openConversation(conversationId);
+  });
+  source.addEventListener("cancelled", async () => {
+    source.close();
+    await openConversation(conversationId);
+  });
+  source.addEventListener("error", async () => {
+    source.close();
+    await openConversation(conversationId);
+  });
+};
+
 refresh();
