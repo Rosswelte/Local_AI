@@ -1,13 +1,13 @@
 - name: qwen3:1.7b
   label: Qwen 3 1.7B
-  size_mb: 1200
+  size_mb: 1812
   ram_min_mb: 2200
-  vram_min_mb: 1400
+  vram_min_mb: 1900
   gpu_required: false
   context_tokens: 4096
   perf:
-    cpu_tokens_s: 8
-    gpu_tokens_s: 25
+    cpu_tokens_s: 6.64
+    gpu_tokens_s: 8.14
 - name: qwen3:4b
   label: Qwen 3 4B
   size_mb: 2800
