@@ -16,6 +16,11 @@ DATA_DIR=./data OLLAMA_URL=http://127.0.0.1:11434 \
 `GET /api/v1/health` est disponible immédiatement. `GET /api/v1/ready` devient
 disponible après l'ouverture de la base et la détection matérielle.
 
+Les services distants se configurent via `POST /api/v1/services`. Le champ
+`api_key` est chiffré avec la clé maître et n'est jamais renvoyé par l'API;
+`ORCHESTRATOR_SECRET_KEY` permet de fournir cette clé, sinon elle est générée
+dans `DATA_DIR/secrets/master.key` avec les permissions 0600.
+
 ## Docker
 
 ```bash

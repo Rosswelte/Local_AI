@@ -1,5 +1,6 @@
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 from app.errors import AppError
 from app.hardware.compatibility import evaluate
 from app.orchestrator.jobs import create_job
+from app.providers.openai_compatible import validate_headers
 
 
 router = APIRouter(prefix="/api/v1")
@@ -21,6 +23,7 @@ class ConversationIn(BaseModel):
 class MessageIn(BaseModel):
     content: str = Field(min_length=1)
     force: bool = False
+    allow_remote: bool = False
 
 
 class BehaviorIn(BaseModel):
@@ -38,6 +41,15 @@ class SettingsIn(BaseModel):
 
 class PinIn(BaseModel):
     pinned: bool = True
+
+
+class ServiceIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=500)
+    model: str = Field(min_length=1, max_length=200)
+    api_key: str = Field(min_length=1, max_length=4096)
+    type: str = "llm"
+    extra_headers: dict[str, str] = {}
 
 
 def state(request: Request):
@@ -140,6 +152,75 @@ async def create_behavior(payload: BehaviorIn, request: Request):
     return {"id": behavior_id, "name": payload.name, "description": payload.description, "system_prompt": payload.system_prompt, "default_model_id": payload.default_model_id, "allowed_tools": payload.allowed_tools, "params": payload.params}
 
 
+@router.post("/services")
+async def create_service(payload: ServiceIn, request: Request):
+    _validate_service_url(payload.url)
+    try:
+        validate_headers(payload.extra_headers, payload.api_key)
+    except ValueError as exc:
+        raise AppError("validation_error", str(exc), 422) from exc
+
+    def insert(con):
+        service_id = con.execute(
+            "INSERT INTO services(name, type, url, is_remote, api_key_enc, extra_headers_enc) VALUES (?, ?, ?, 1, ?, ?)",
+            (payload.name, payload.type, payload.url.rstrip("/"), request.app.state.secrets.encrypt(payload.api_key), request.app.state.secrets.encrypt(json.dumps(payload.extra_headers))),
+        ).lastrowid
+        model_id = con.execute(
+            "INSERT INTO models(name, label, display_name, provider, service_id, type, capabilities, installed) VALUES (?, ?, ?, 'openai_compatible', ?, ?, '[]', 1)",
+            (payload.model, payload.model, payload.model, service_id, payload.type),
+        ).lastrowid
+        return service_id, model_id
+
+    try:
+        service_id, model_id = await request.app.state.db.write(insert)
+    except Exception as exc:
+        raise AppError("validation_error", "Impossible de créer ce service", 422) from exc
+    row = await request.app.state.db.read(lambda con: dict(con.execute("SELECT * FROM services WHERE id=?", (service_id,)).fetchone()))
+    try:
+        provider = await request.app.state.service_manager.register_remote_service(row)
+        status = "online" if await provider.health() else "offline"
+    except Exception as exc:
+        status = "offline"
+        provider = None
+        await request.app.state.db.write(lambda con: con.execute("UPDATE services SET last_status='offline', last_check_at=CURRENT_TIMESTAMP WHERE id=?", (service_id,)))
+        if provider is None:
+            raise AppError("provider_unreachable", "Le service est enregistré mais injoignable", 502) from exc
+    await request.app.state.db.write(lambda con, value: con.execute("UPDATE services SET last_status=?, last_check_at=CURRENT_TIMESTAMP WHERE id=?", (value, service_id)), status)
+    return {"id": service_id, "model_id": model_id, "name": payload.name, "url": payload.url, "type": payload.type, "status": status}
+
+
+@router.post("/services/{service_id}/test")
+async def test_service(service_id: int, request: Request):
+    row = await request.app.state.db.read(lambda con: con.execute("SELECT * FROM services WHERE id=? AND is_remote=1", (service_id,)).fetchone())
+    if not row:
+        raise AppError("not_found", "Service distant introuvable", 404)
+    provider = request.app.state.providers.get(request.app.state.service_manager.provider_key(service_id))
+    if not provider:
+        provider = await request.app.state.service_manager.register_remote_service(dict(row))
+    try:
+        online = bool(await provider.health())
+    except Exception:
+        online = False
+    status = "online" if online else "offline"
+    await request.app.state.db.write(lambda con: con.execute("UPDATE services SET last_status=?, last_check_at=CURRENT_TIMESTAMP WHERE id=?", (status, service_id)))
+    return {"service_id": service_id, "status": status}
+
+
+@router.delete("/services/{service_id}")
+async def delete_service(service_id: int, request: Request):
+    active = await request.app.state.db.read(lambda con: con.execute("SELECT id FROM jobs WHERE model_id IN (SELECT id FROM models WHERE service_id=?) AND state IN ('queued', 'running') LIMIT 1", (service_id,)).fetchone())
+    if active:
+        raise AppError("resource_busy", "Le service est utilisé par un job actif", 409, {"job_id": active["id"]})
+    row = await request.app.state.db.read(lambda con: con.execute("SELECT id FROM services WHERE id=? AND is_remote=1", (service_id,)).fetchone())
+    if not row:
+        raise AppError("not_found", "Service distant introuvable", 404)
+    provider = request.app.state.providers.pop(request.app.state.service_manager.provider_key(service_id), None)
+    if provider and hasattr(provider, "close"):
+        await provider.close()
+    await request.app.state.db.write(lambda con: con.execute("DELETE FROM services WHERE id=?", (service_id,)))
+    return {"deleted": service_id}
+
+
 @router.post("/models/sync")
 async def sync_models(request: Request):
     try:
@@ -154,6 +235,8 @@ async def sync_models(request: Request):
 @router.post("/models/{model_id}/load")
 async def load_model(model_id: int, request: Request):
     model = await _model(request, model_id)
+    if model["provider"] != "ollama":
+        raise AppError("provider_unavailable", "Le préchargement de ce provider n'est pas disponible", 409)
     if not model["installed"]:
         raise AppError("model_not_installed", "Installez d'abord ce modèle", 409)
     try:
@@ -167,6 +250,8 @@ async def load_model(model_id: int, request: Request):
 @router.post("/models/{model_id}/unload")
 async def unload_model(model_id: int, request: Request):
     model = await _model(request, model_id)
+    if model["provider"] != "ollama":
+        raise AppError("provider_unavailable", "Le déchargement de ce provider n'est pas disponible", 409)
     try:
         await request.app.state.resources.unload("ollama", model["name"])
     except Exception as exc:
@@ -177,14 +262,17 @@ async def unload_model(model_id: int, request: Request):
 @router.post("/models/{model_id}/pin")
 async def pin_model(model_id: int, payload: PinIn, request: Request):
     model = await _model(request, model_id)
+    provider_name = _provider_name(model, request)
     await request.app.state.db.write(lambda con: con.execute("UPDATE models SET pinned=? WHERE id=?", (int(payload.pinned), model_id)))
-    await request.app.state.resources.set_pinned("ollama", model["name"], payload.pinned)
+    await request.app.state.resources.set_pinned(provider_name, model["name"], payload.pinned)
     return {"model_id": model_id, "pinned": payload.pinned}
 
 
 @router.delete("/models/{model_id}/install")
 async def delete_model(model_id: int, request: Request):
     model = await _model(request, model_id)
+    if model["provider"] != "ollama":
+        raise AppError("provider_unavailable", "La suppression de ce provider n'est pas disponible", 409)
     active = await request.app.state.db.read(lambda con: con.execute("SELECT id FROM jobs WHERE model_id=? AND state IN ('queued', 'running') LIMIT 1", (model_id,)).fetchone())
     if active:
         raise AppError("resource_busy", "Le modèle est utilisé par un job actif", 409, {"job_id": active["id"]})
@@ -240,6 +328,12 @@ async def send_message(conversation_id: int, payload: MessageIn, request: Reques
             raise AppError("model_disabled", "Le modèle est désactivé", 409)
         if not model["installed"]:
             raise AppError("model_not_installed", "Installez d'abord ce modèle", 409)
+        provider_name = _provider_name(dict(model), request)
+        if model["service_id"] is not None:
+            remote_setting = con.execute("SELECT value FROM settings WHERE key='remote_warn_before_send'").fetchone()
+            remote_warning = True if not remote_setting or remote_setting["value"] is None else bool(json.loads(remote_setting["value"]))
+            if remote_warning and not payload.allow_remote:
+                raise AppError("confirmation_required", "Cette requête enverra vos données à un service distant", 409, {"remote": True})
         fit = evaluate(dict(model), request.app.state.profile)
         if fit["level"] == "impossible":
             raise AppError("fit_impossible", "Les ressources minimales détectées sont insuffisantes", 409, {"missing_mb": fit["missing_mb"]})
@@ -247,7 +341,7 @@ async def send_message(conversation_id: int, payload: MessageIn, request: Reques
             raise AppError("confirmation_required", "Ce modèle nécessite une confirmation", 409, {"fit": fit})
         user = con.execute("INSERT INTO messages(conversation_id, role, content, status) VALUES (?, 'user', ?, 'complete')", (conversation_id, payload.content))
         assistant = con.execute("INSERT INTO messages(conversation_id, role, content, status) VALUES (?, 'assistant', '', 'streaming')", (conversation_id,)).lastrowid
-        job = con.execute("INSERT INTO jobs(kind, provider, model_id, message_id, force) VALUES ('text', 'ollama', ?, ?, ?)", (conversation["model_id"], assistant, int(payload.force))).lastrowid
+        job = con.execute("INSERT INTO jobs(kind, provider, model_id, message_id, force) VALUES ('text', ?, ?, ?, ?)", (provider_name, conversation["model_id"], assistant, int(payload.force))).lastrowid
         con.execute("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (conversation_id,))
         return {"message_id": assistant, "job_id": job}
     result = await request.app.state.db.write(insert)
@@ -307,6 +401,12 @@ async def _model(request: Request, model_id: int):
     return dict(row)
 
 
+def _provider_name(model: dict[str, Any], request: Request) -> str:
+    if model.get("service_id") is not None:
+        return request.app.state.service_manager.provider_key(int(model["service_id"]))
+    return "ollama"
+
+
 def _save_profile(con, profile):
     gpu = profile.gpu
     con.execute("""INSERT INTO machine_profile(id, ram_total_mb, ram_available_mb, cpu_cores, gpu_name, gpu_total_mb,
@@ -333,3 +433,13 @@ def _behavior(row):
     item["params"] = json.loads(item["params"] or "{}")
     item["active"] = bool(item["active"])
     return item
+
+
+def _validate_service_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise AppError("validation_error", "URL de service invalide", 422)
+    host = parsed.hostname.lower()
+    private = host in {"localhost", "127.0.0.1", "::1"} or host.startswith(("10.", "192.168.", "172.16."))
+    if parsed.scheme != "https" and not private:
+        raise AppError("validation_error", "HTTPS est requis pour un hôte public", 422)

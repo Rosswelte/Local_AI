@@ -22,6 +22,7 @@ from app.providers.ollama import OllamaProvider
 from app.providers.manager import ProviderManager
 from app.services.catalog import load_catalog, upsert_catalog
 from app.services.manager import ServiceManager
+from app.services.secrets import SecretService
 from app.services.settings import read_settings
 from app.errors import AppError
 
@@ -43,8 +44,10 @@ async def lifespan(app: FastAPI):
     app.state.ollama = ollama
     app.state.providers = {"ollama": ollama}
     app.state.provider_manager = ProviderManager(app.state.providers)
-    app.state.service_manager = ServiceManager(db, app.state.providers)
+    app.state.secrets = SecretService(settings.data_dir)
+    app.state.service_manager = ServiceManager(db, app.state.providers, app.state.secrets)
     await app.state.service_manager.ensure_local_services(settings.ollama_url)
+    await app.state.service_manager.register_remote_services()
     try:
         installed = await ollama.installed_models()
         await db.write(_sync_installed_names, {item.get("name") for item in installed})
@@ -70,6 +73,7 @@ async def lifespan(app: FastAPI):
     finally:
         app.state.ready = False
         await app.state.jobs.stop()
+        await app.state.service_manager.close_remote()
         await ollama.close()
         await db.close()
 

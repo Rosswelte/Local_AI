@@ -14,6 +14,9 @@ l'épinglage et l'éviction LRU hors verrou. Les providers distants, le schedule
 avancé et le chiffrement des secrets restent les prochains jalons. La migration
 `003_scheduler.sql` ajoute les tentatives, retries avec backoff et délais; le
 scheduler peut démarrer plusieurs workers lorsque `allow_parallel` est activé.
+V2.4 ajoute le stockage chiffré des clés hors base, le provider
+OpenAI-compatible, les en-têtes contrôlés et l'avertissement avant un envoi
+distant.
 
 La V1 utilise un seul worker Uvicorn, une connexion SQLite d'écriture confinée
 à un thread, un catalogue YAML synchronisé sans écraser l'état local, un

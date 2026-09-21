@@ -95,6 +95,11 @@ class JobManager:
             try:
                 policy = self.scheduler.policy(job)
                 await asyncio.wait_for(self._run_job(job), timeout=policy.timeout_s)
+            except asyncio.CancelledError:
+                cancelled = await self.db.read(lambda con, job_id: bool(con.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()[0]), job["id"])
+                if not cancelled:
+                    raise
+                terminal = not await self._handle_failure(job, AppError("cancelled", "Le job a été annulé", 409))
             except asyncio.TimeoutError:
                 terminal = not await self._handle_failure(job, AppError("provider_timeout", "Le provider n'a pas répondu dans le délai", 504))
             except Exception as exc:
