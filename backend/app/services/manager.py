@@ -15,10 +15,13 @@ class ServiceManager:
     def provider_key(service_id: int) -> str:
         return f"service:{service_id}"
 
-    async def ensure_local_services(self, ollama_url: str) -> None:
+    async def ensure_local_services(self, ollama_url: str, comfyui_url: str) -> None:
         await self.db.write(lambda con: con.execute("""INSERT INTO services(name, type, url, is_remote, last_status)
             VALUES ('ollama', 'llm', ?, 0, 'offline')
             ON CONFLICT(name) DO UPDATE SET type=excluded.type, url=excluded.url""", (ollama_url,)))
+        await self.db.write(lambda con: con.execute("""INSERT INTO services(name, type, url, is_remote, last_status)
+            VALUES ('comfyui', 'image', ?, 0, 'offline')
+            ON CONFLICT(name) DO UPDATE SET type=excluded.type, url=excluded.url""", (comfyui_url,)))
 
     async def register_remote_services(self) -> None:
         rows = await self.db.read(lambda con: [dict(row) for row in con.execute("SELECT * FROM services WHERE is_remote=1 AND enabled=1")])

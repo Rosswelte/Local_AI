@@ -19,6 +19,7 @@ from app.orchestrator.jobs import JobManager, restart_jobs
 from app.orchestrator.resource_manager import ResourceManager
 from app.orchestrator.scheduler import Scheduler
 from app.providers.ollama import OllamaProvider
+from app.providers.comfyui import ComfyUIProvider
 from app.providers.manager import ProviderManager
 from app.services.catalog import load_catalog, upsert_catalog
 from app.services.manager import ServiceManager
@@ -41,12 +42,14 @@ async def lifespan(app: FastAPI):
     await db.write(_save_profile, profile)
     await db.write(restart_jobs)
     ollama = OllamaProvider(settings.ollama_url)
+    comfyui = ComfyUIProvider(settings.comfyui_url)
     app.state.ollama = ollama
-    app.state.providers = {"ollama": ollama}
+    app.state.comfyui = comfyui
+    app.state.providers = {"ollama": ollama, "comfyui": comfyui}
     app.state.provider_manager = ProviderManager(app.state.providers)
     app.state.secrets = SecretService(settings.data_dir)
     app.state.service_manager = ServiceManager(db, app.state.providers, app.state.secrets)
-    await app.state.service_manager.ensure_local_services(settings.ollama_url)
+    await app.state.service_manager.ensure_local_services(settings.ollama_url, settings.comfyui_url)
     await app.state.service_manager.register_remote_services()
     try:
         installed = await ollama.installed_models()
@@ -67,7 +70,7 @@ async def lifespan(app: FastAPI):
     memory_guard_percent = configured["min_free_ram_percent"]["value"]
     memory_guard_percent = float(memory_guard_percent if memory_guard_percent is not None else 5)
     app.state.scheduler = Scheduler(worker_count)
-    app.state.jobs = JobManager(db, app.state.providers, resources, app.state.scheduler, memory_guard_percent)
+    app.state.jobs = JobManager(db, app.state.providers, resources, app.state.scheduler, memory_guard_percent, settings.data_dir)
     await app.state.jobs.start()
     app.state.ready = True
     try:
@@ -77,6 +80,7 @@ async def lifespan(app: FastAPI):
         await app.state.jobs.stop()
         await app.state.service_manager.close_remote()
         await ollama.close()
+        await comfyui.close()
         await db.close()
 
 

@@ -1,7 +1,8 @@
 # Orchestrateur IA
 
-Orchestrateur local FastAPI pour Ollama, avec SQLite, catalogue de modeles,
-jobs, chat SSE, services distants chiffres et suivi des ressources.
+Orchestrateur local FastAPI pour Ollama et ComfyUI, avec SQLite, catalogue de
+modeles, jobs, chat SSE, generations image, services distants chiffres et
+suivi des ressources.
 
 ## Fonctionnalites V2.6
 
@@ -77,4 +78,55 @@ par l'API.
 PYTHONPATH=backend .venv/bin/python -m pytest -q backend/tests
 ```
 
-La suite actuelle contient 25 tests.
+La suite actuelle contient 36 tests.
+
+## V3.1 en cours
+
+La branche `v3` ajoute la generation image via un provider ComfyUI HTTP. Le
+workflow `reference` est versionne dans `backend/catalog/workflows/` et les
+sorties sont conservees sous `DATA_DIR/outputs/{job_id}`.
+
+Service ComfyUI (tache longue, ~10 Go a telecharger, a lancer manuellement) :
+
+```bash
+docker compose pull comfyui
+docker compose up -d comfyui
+```
+
+L'image est epinglee a `yanwk/comfyui-boot:cu126-slim` (CUDA 12.6) : les
+images `cu130` ne supportent pas Maxwell, donc pas la GeForce 840M de la
+machine de reference. GPU via le profil existant :
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d comfyui
+```
+
+Checkpoints a deposer dans `./comfyui/models/checkpoints/` (jamais dans
+l'image). Le workflow `reference` cite `sd_xl_base_1.0.safetensors`, mais
+SDXL en 1024x1024 ne passe pas sur 7,7 Go de RAM + 4 Go de VRAM : viser un
+modele leger (type SD 1.5) et des petites dimensions pour le premier test.
+Avec moins de 6 Go de VRAM, demarrer avec `COMFYUI_CLI_ARGS=--lowvram`.
+
+Configuration :
+
+```bash
+COMFYUI_URL=http://127.0.0.1:8188
+```
+
+Validation :
+
+```bash
+curl -sS http://127.0.0.1:8188/system_stats
+```
+
+Routes image :
+
+- `GET /api/v1/image/workflows` : workflows controles disponibles.
+- `POST /api/v1/image/jobs` : creation d'un job image.
+- `GET /api/v1/jobs/{id}/stream` : progression et sorties SSE.
+- `GET /api/v1/image/jobs/{id}/outputs` : metadonnees des sorties.
+- `GET /api/v1/image/jobs/{id}/outputs/{output_id}` : fichier image controle.
+
+Les checkpoints ne sont jamais telecharges par le projet : ils se deposent
+dans `./comfyui/models/` et la generation reelle reste une etape
+d'integration separee.

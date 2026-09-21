@@ -48,13 +48,13 @@ class Database:
 
         return await asyncio.get_running_loop().run_in_executor(self._writer_pool, init)
 
-    async def write(self, fn: Callable[..., Any], *args: Any) -> Any:
+    async def write(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         def run() -> Any:
             if self._writer is None:
                 raise RuntimeError("database is not started")
             self._writer.execute("BEGIN IMMEDIATE")
             try:
-                result = fn(self._writer, *args)
+                result = fn(self._writer, *args, **kwargs)
                 self._writer.execute("COMMIT")
                 return result
             except Exception:
@@ -63,11 +63,11 @@ class Database:
 
         return await asyncio.get_running_loop().run_in_executor(self._writer_pool, run)
 
-    async def read(self, fn: Callable[..., Any], *args: Any) -> Any:
+    async def read(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         def run() -> Any:
             con = open_connection(self.path)
             try:
-                return fn(con, *args)
+                return fn(con, *args, **kwargs)
             finally:
                 con.close()
 
