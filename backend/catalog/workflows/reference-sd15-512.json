@@ -1,0 +1,44 @@
+{
+  "label": "Reference SD 1.5 512",
+  "workflow": {
+    "3": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": {"ckpt_name": "v1-5-pruned.ckpt"}
+    },
+    "6": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {"text": "__PROMPT__", "clip": ["3", 1]}
+    },
+    "7": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {"text": "", "clip": ["3", 1]}
+    },
+    "5": {
+      "class_type": "EmptyLatentImage",
+      "inputs": {"width": 512, "height": 512, "batch_size": 1}
+    },
+    "4": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0,
+        "steps": 12,
+        "cfg": 7,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "denoise": 1,
+        "model": ["3", 0],
+        "positive": ["6", 0],
+        "negative": ["7", 0],
+        "latent_image": ["5", 0]
+      }
+    },
+    "8": {
+      "class_type": "VAEDecode",
+      "inputs": {"samples": ["4", 0], "vae": ["3", 2]}
+    },
+    "9": {
+      "class_type": "SaveImage",
+      "inputs": {"filename_prefix": "orchestrator", "images": ["8", 0]}
+    }
+  }
+}

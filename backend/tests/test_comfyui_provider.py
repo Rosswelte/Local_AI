@@ -55,7 +55,8 @@ async def test_comfyui_provider_rejects_unsafe_output_path():
 
 
 def test_reference_workflow_is_versioned_and_overrides_are_limited():
-    assert list_workflows() == [{"id": "reference", "label": "Reference SDXL"}]
+    assert {"id": "reference", "label": "Reference SDXL"} in list_workflows()
+    assert {"id": "reference-sd15-512", "label": "Reference SD 1.5 512"} in list_workflows()
     workflow = apply_overrides(load_workflow("reference"), prompt="un chat", seed=42, steps=12, cfg=5.5, width=512, height=768)
 
     assert workflow["6"]["inputs"]["text"] == "un chat"
@@ -152,7 +153,8 @@ def test_image_routes_validate_workflows_and_jobs(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("EXPOSE_HOST", "127.0.0.1")
     with TestClient(app) as client:
-        assert client.get("/api/v1/image/workflows").json() == [{"id": "reference", "label": "Reference SDXL"}]
+        assert {"id": "reference", "label": "Reference SDXL"} in client.get("/api/v1/image/workflows").json()
+        assert {"id": "reference-sd15-512", "label": "Reference SD 1.5 512"} in client.get("/api/v1/image/workflows").json()
         assert client.post("/api/v1/image/jobs", json={"workflow_id": "missing", "prompt": "test"}).status_code == 404
         assert client.post("/api/v1/image/jobs", json={"workflow_id": "reference", "prompt": ""}).status_code == 422
 
